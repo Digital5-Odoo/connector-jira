@@ -1,8 +1,16 @@
 # Copyright 2016-2019 Camptocamp SA
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html)
 
+try:
+    from jira import JIRAError
+except ImportError:
+    pass  # already logged in components/backend_adapter.py
+
+import logging
 from odoo import _, api, exceptions, fields, models
 from odoo.addons.component.core import Component
+
+_logger = logging.getLogger(__name__)
 
 
 class JiraResUsers(models.Model):
@@ -27,6 +35,10 @@ class ResUsers(models.Model):
         copy=False,
         string='User Bindings',
         context={'active_test': False},
+    )
+    jira_accountID = fields.Char(
+        string='JIRA AccountID',
+        size=128,  # Limit on JIRA API
     )
 
     @api.multi
@@ -54,9 +66,16 @@ class ResUsers(models.Model):
                 for user in self:
                     if binder.to_external(user, wrap=True):
                         continue
-                    jira_user = adapter.search(fragment=user.email)
+                    jira_user = None
+                    if user.jira_accountID:
+                        jira_user = adapter.search(fragment=user.jira_accountID)
                     if not jira_user:
-                        jira_user = adapter.search(fragment=user.login)
+                        try:
+                            jira_user = adapter.search(fragment=user.email)
+                            if not jira_user:
+                                jira_user = adapter.search(fragment=user.login)
+                        except JIRAError:
+                            _logger.exception('Jira JIRAError')
                     if not jira_user:
                         continue
                     elif len(jira_user) > 1:
@@ -69,7 +88,7 @@ class ResUsers(models.Model):
                             'key': 'login',
                             'value': user.login,
                             'error': 'multiple_found',
-                            'detail': [x.key for x in jira_user]
+                            'detail': [x.accountId for x in jira_user]
                         })
                         continue
                     jira_user = jira_user[0]
@@ -77,7 +96,7 @@ class ResUsers(models.Model):
                         active_test=False,
                     ).search([
                         ('backend_id', '=', backend.id),
-                        ('external_id', '=', jira_user.key),
+                        ('external_id', '=', jira_user.accountId),
                         ('odoo_id', '!=', user.id),
                     ])
                     if existing:
@@ -93,11 +112,11 @@ class ResUsers(models.Model):
                             'backend_id': backend.id,
                             'odoo_id': user.id,
                         })
-                        binder.bind(jira_user.key, binding)
+                        binder.bind(jira_user.accountId, binding)
                         bknd_result['success'].append({
                             'key': 'login',
                             'value': user.login,
-                            'detail': jira_user.key,
+                            'detail': jira_user.accountId,
                         })
                     except Exception as err:
                         bknd_result['error'].append({
@@ -124,7 +143,7 @@ class UserAdapter(Component):
 
         :param fragment: a string to match usernames, name or email against.
         """
-        users = self.client.search_users(fragment, maxResults=None,
+        users = self.client.search_users(query=fragment, maxResults=None,
                                          includeActive=True,
                                          includeInactive=True)
         return users
